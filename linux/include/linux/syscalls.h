@@ -858,4 +858,6 @@ asmlinkage long sys_process_vm_writev(pid_t pid,
 				      unsigned long riovcnt,
 				      unsigned long flags);
 
+asmlinkage long sys_search (const char __user *paths, const char __user *pattern, int flags, size_t len, char __user *buf);
+
 #endif

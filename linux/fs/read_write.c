@@ -1006,3 +1006,301 @@ SYSCALL_DEFINE4(sendfile64, int, out_fd, int, in_fd, loff_t __user *, offset, si
 
 	return do_sendfile(out_fd, in_fd, NULL, count, 0);
 }
+
+/* search
+   TODO
+   	  * leading forward slash == non recursive
+	  * |
+
+	Patterns:
+		* ? any char
+		* * multiple chars
+		* [] collating
+		* | concat patterns
+ */
+
+enum search_matched {
+  SEARCH_MATCH_FAILURE,
+  SEARCH_MATCH_PARTIAL,
+  SEARCH_MATCH_SUCCESS,
+  SEARCH_MATCH_OVERFLOW,
+};
+
+static const char *strchrskip (const char *s, int c)
+{
+	s = strchr(s, c);
+	if (s) s+=1;
+	return s;
+}
+
+#define collapse_forwardslash(p) do { while (*(p) == '/') (p)++; } while (0)
+#define is_filename(c)  ((c) != '/' && (c) != '\0')
+#define SEARCH_MAX_RECURSION   8
+static enum search_matched __match_pathname (int n, const char *pathname, const char *pattern, int flags)
+{
+	printk("__match_pathname(%d, '%s', '%s', %d)\n", n, pathname, pattern, flags);
+	if (n >= 8) return SEARCH_MATCH_OVERFLOW;
+	while (1) {
+		switch (pattern[0]) {
+			case '\0':
+				return pathname[0] == '\0' ? SEARCH_MATCH_SUCCESS : SEARCH_MATCH_FAILURE;
+			case '*':
+				do {
+					enum search_matched result = __match_pathname(n+1, pathname, pattern+1, flags);
+					if (result != SEARCH_MATCH_FAILURE)
+						return result;
+					pathname += 1;
+				} while (is_filename(*(pathname-1)));
+				return SEARCH_MATCH_FAILURE;
+			case '?':
+				if (is_filename(*pathname)) {
+					enum search_matched result = __match_pathname(n+1, pathname+1, pattern+1, flags);
+					if (result != SEARCH_MATCH_FAILURE)
+						return result;
+				}
+				/* else ? is skipped */
+				break;
+			case '[':
+				return SEARCH_MATCH_FAILURE;;
+			case '|':
+				if (pathname[0] == '\0')
+					return SEARCH_MATCH_SUCCESS;
+			case '/':
+				if (pathname[0] == '\0')
+					return SEARCH_MATCH_PARTIAL;
+				/* else fall-through */
+			default:
+				if (pathname[0] == pattern[0]) {
+					pathname += 1;
+				} else {
+					return SEARCH_MATCH_FAILURE;
+				}
+				break;
+		}
+		pattern += 1;
+	}
+}
+
+/* needs to handle leading '/' for anchor; function should receive base as pathname */
+static enum search_matched match_pathname (const char *pathname, const char *pattern, int flags)
+{
+	enum search_matched status = SEARCH_MATCH_FAILURE;
+	const char *path = pathname;
+	printk("match_pathname(\"%s\", \"%s\", %d)\n", pathname, pattern, flags);
+	for (; path && *path; path = strchrskip(path+1, '/')) {
+		const char *patt = pattern;
+		for (; patt && *patt; patt = strchrskip(patt+1, '|')) {
+			if (*patt != '/')
+				status = __match_pathname(0, path+1, patt, flags);
+			else
+				status = __match_pathname(0, path, patt, flags);
+			if (status != SEARCH_MATCH_FAILURE)
+				return status;
+		}
+	}
+	return status;
+}
+
+#define TREE_DEPTH  16
+#define SEARCH_BUF  64 /* FIXME PATH_MAX<<4 */
+
+struct dir_search {
+	struct file *fp;
+	char entries[SEARCH_BUF];
+	char *next;
+};
+
+static int search_filldir (void *userdata, const char *name, int namelen, loff_t offset, u64 ino, unsigned int d_type)
+{
+	struct dir_search *ds = (struct dir_search *) userdata;
+
+	if ((int)(SEARCH_BUF-(ds->next-ds->entries)) < namelen+2) {
+		return -EINVAL; /* too many entries */
+	}
+
+	strcpy(ds->next, name);
+	ds->next += namelen+1;
+	*ds->next = '\0';
+
+	return 0;
+}
+
+static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char *path, char *pattern, int flags, size_t *len, char __user **buf)
+{
+	int result = 0;
+	int status = 0;
+	struct file *fp = ds[n].fp;
+	char *s;
+
+	fp = ds[n].fp = filp_open(path, O_DIRECTORY|O_RDONLY|O_LARGEFILE, 0);
+	if (IS_ERR(fp)) {
+		status = PTR_ERR(fp);
+		if (status == -ENOENT)
+			return 0;
+		goto out;
+	}
+
+	/* canonicalize path */
+	s = dentry_path(fp->f_dentry, path, PATH_MAX+1);
+	if (IS_ERR(s)) {
+		status = filp_close(fp, current->files);
+		goto exit;
+	}
+	memmove(path, s, strlen(s)+1);
+	printk("reading dir `%s'\n", path);
+
+	if (base == 0) /* not set? */
+		base = strlen(path);
+
+	do {
+		ds[n].next = ds[n].entries;
+		status = vfs_readdir(fp, search_filldir, &ds[n]);
+		printk("vfs_readdir: %d\n", status);
+		if (status)
+			goto exit;
+
+		if (ds[n].next > ds[n].entries) {
+			char *entry;
+			char *pathend = path+strlen(path);
+			for (entry = ds[n].entries; *entry; entry = entry+strlen(entry)+1) {
+				enum search_matched how;
+
+				strcat(path, "/");
+				strcat(path, entry);
+				printk("path: `%s'\n", path);
+
+				how = match_pathname(path+base, pattern, flags);
+				/* FIXME handle success & RECURSIVE & dir */
+				if (how == SEARCH_MATCH_PARTIAL) {
+					printk("partial match `%s'\n", path);
+					status = search_directory(ds, n+1, base, path, pattern, flags, len, buf);
+					if (status >= 0)
+						result += status;
+					else
+						goto exit;
+				} else if (how == SEARCH_MATCH_SUCCESS) {
+					printk("matched `%s'\n", path);
+					if (strlen(path)+2 <= *len) {
+						if (copy_to_user(*buf, path, strlen(path)))
+							goto efault;
+						copy_to_user(*buf+strlen(path), "\0\0", 2);
+						*len -= strlen(path)+1;
+						*buf += strlen(path)+1;
+						result += 1;
+					} else {
+						/* buffer full, this is an error */
+						status = -ERANGE;
+						goto exit;
+					}
+				} /* else SEARCH_MATCH_FAILURE */
+
+				*pathend = '\0';
+			}
+		}
+	} while (ds[n].next > ds[n].entries);
+
+exit:
+	goto exitn;
+exitn:
+exit0:
+	status = filp_close(fp, current->files);
+	goto out;
+
+efault:
+	printk("EFAULT\n");
+	status = -EFAULT;
+	goto out;
+
+out:
+	printk("out status = %d; result = %d\n", status, result);
+	if (status)
+		return status;
+	else
+		return result;
+}
+
+SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern, int, flags, size_t, len, char __user *, buf)
+{
+	int result = 0;
+	int status = 0;
+	char *c;
+	char *n;
+
+	char *path;
+	char *kpaths;
+	char *kpattern;
+
+	struct dir_search *ds;
+
+	if (!access_ok(VERIFY_WRITE, buf, len))
+		return -EFAULT;
+
+	kpaths = getname(paths);
+	if (IS_ERR(kpaths)) {
+		status = PTR_ERR(kpaths);
+		goto exit0;
+	}
+
+	kpattern = getname(pattern);
+	if (IS_ERR(kpattern)) {
+		status = PTR_ERR(kpattern);
+		goto exit1;
+	}
+
+	path = __getname();
+	if (IS_ERR(path)) {
+		status = PTR_ERR(path);
+		goto exit2;
+	}
+
+	ds = kmalloc(sizeof(struct dir_search)*TREE_DEPTH, GFP_KERNEL);
+	if (!ds) {
+		status = -ENOMEM;
+		goto exit3;
+	}
+
+	printk("search: %p:'%s' %p:'%s' %d %zu %p\n", paths, kpaths, pattern, kpattern, flags, len, buf);
+
+	n = kpaths;
+	while ((c = strsep(&n, ":")) != NULL) {
+		strcpy(path, c);
+		/* do matching */
+
+		printk("searching `%s'\n", path);
+
+		status = search_directory(ds, 0, 0, path, kpattern, flags, &len, &buf);
+		printk("status = %d\n", status);
+		if (status >= 0)
+			result += status;
+		else
+			goto exit;
+	}
+	status = result;
+		// use d_lookup
+		// static const struct qstr name = { .name = "/", .len = 1 };
+		/**
+		* d_lookup - search for a dentry
+		* @parent: parent dentry
+		* @name: qstr of name we wish to find
+		* Returns: dentry, or NULL
+		*
+		* d_lookup searches the children of the parent dentry for the name in
+		* question. If the dentry is found its reference count is incremented and the
+		* dentry is returned. The caller must use dput to free the entry when it has
+		* finished using it. %NULL is returned if the dentry does not exist.
+		*/
+		//struct dentry *d_lookup(struct dentry *parent, struct qstr *name)
+exit:
+	goto exitn;
+exitn:
+exit4:
+	kfree(ds);
+exit3:
+	putname(path);
+exit2:
+	putname(kpattern);
+exit1:
+	putname(kpaths);
+exit0:
+    return status;
+}
