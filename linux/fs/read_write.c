@@ -1087,13 +1087,13 @@ static enum search_matched match_pathname (const char *pathname, const char *pat
 	enum search_matched status = SEARCH_MATCH_FAILURE;
 	const char *path = pathname;
 	printk("match_pathname(\"%s\", \"%s\", %d)\n", pathname, pattern, flags);
-	for (; path && *path; path = strchrskip(path+1, '/')) {
+	for (; path; path = strchr(path+1, '/')) {
 		const char *patt = pattern;
-		for (; patt && *patt; patt = strchrskip(patt+1, '|')) {
-			if (*patt != '/')
-				status = __match_pathname(0, path+1, patt, flags);
-			else
+		for (; patt; patt = strchrskip(patt+1, '|')) {
+			if (*patt == '/')
 				status = __match_pathname(0, path, patt, flags);
+			else
+				status = __match_pathname(0, path+1, patt, flags);
 			if (status != SEARCH_MATCH_FAILURE)
 				return status;
 		}
@@ -1103,6 +1103,15 @@ static enum search_matched match_pathname (const char *pathname, const char *pat
 
 #define TREE_DEPTH  16
 #define SEARCH_BUF  64 /* FIXME PATH_MAX<<4 */
+
+static int search_isrecursive (const char *pattern)
+{
+	for (; pattern; pattern = strchrskip(pattern+1, '|')) {
+		if (*pattern != '/')
+			return 1;
+	}
+	return 0;
+}
 
 struct dir_search {
 	struct file *fp;
@@ -1114,10 +1123,17 @@ static int search_filldir (void *userdata, const char *name, int namelen, loff_t
 {
 	struct dir_search *ds = (struct dir_search *) userdata;
 
-	if ((int)(SEARCH_BUF-(ds->next-ds->entries)) < namelen+2) {
+	if ((int)(SEARCH_BUF-(ds->next-ds->entries)) < namelen+3) {
 		return -EINVAL; /* too many entries */
 	}
 
+	/* first char is 'd' for DT_DIR, 'o' for other */
+	if (d_type == DT_DIR) {
+		strcpy(ds->next, "d");
+	} else {
+		strcpy(ds->next, "o");
+	}
+	ds->next += 1;
 	strcpy(ds->next, name);
 	ds->next += namelen+1;
 	*ds->next = '\0';
@@ -1131,6 +1147,10 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 	int status = 0;
 	struct file *fp = ds[n].fp;
 	char *s;
+	int recursive = search_isrecursive(pattern);
+
+	if (n >= TREE_DEPTH)
+		return 0;
 
 	fp = ds[n].fp = filp_open(path, O_DIRECTORY|O_RDONLY|O_LARGEFILE, 0);
 	if (IS_ERR(fp)) {
@@ -1164,21 +1184,15 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 			char *pathend = path+strlen(path);
 			for (entry = ds[n].entries; *entry; entry = entry+strlen(entry)+1) {
 				enum search_matched how;
+				char type = *entry;
+				entry += 1;
 
 				strcat(path, "/");
 				strcat(path, entry);
-				printk("path: `%s'\n", path);
+				printk("path: `%s' type: %c\n", path, type);
 
 				how = match_pathname(path+base, pattern, flags);
-				/* FIXME handle success & RECURSIVE & dir */
-				if (how == SEARCH_MATCH_PARTIAL) {
-					printk("partial match `%s'\n", path);
-					status = search_directory(ds, n+1, base, path, pattern, flags, len, buf);
-					if (status >= 0)
-						result += status;
-					else
-						goto exit;
-				} else if (how == SEARCH_MATCH_SUCCESS) {
+				if (how == SEARCH_MATCH_SUCCESS) {
 					printk("matched `%s'\n", path);
 					if (strlen(path)+2 <= *len) {
 						if (copy_to_user(*buf, path, strlen(path)))
@@ -1192,6 +1206,14 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 						status = -ERANGE;
 						goto exit;
 					}
+				}
+				if (type == 'd' && strcmp(entry, ".") != 0 && strcmp(entry, "..") != 0 && (how == SEARCH_MATCH_PARTIAL || recursive)) {
+					printk("partial match | recursive `%s'\n", path);
+					status = search_directory(ds, n+1, base, path, pattern, flags, len, buf);
+					if (status >= 0)
+						result += status;
+					else
+						goto exit;
 				} /* else SEARCH_MATCH_FAILURE */
 
 				*pathend = '\0';
@@ -1203,7 +1225,7 @@ exit:
 	goto exitn;
 exitn:
 exit0:
-	status = filp_close(fp, current->files);
+	filp_close(fp, current->files); /* no need to check error? */
 	goto out;
 
 efault:
