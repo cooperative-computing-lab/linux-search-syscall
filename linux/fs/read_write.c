@@ -15,6 +15,7 @@
 #include <linux/syscalls.h>
 #include <linux/pagemap.h>
 #include <linux/splice.h>
+#include <linux/namei.h>
 #include "read_write.h"
 
 #include <asm/uaccess.h>
@@ -1038,7 +1039,7 @@ static const char *strchrskip (const char *s, int c)
 #define SEARCH_MAX_RECURSION   8
 static enum search_matched __match_pathname (int n, const char *pathname, const char *pattern, int flags)
 {
-	printk("__match_pathname(%d, '%s', '%s', %d)\n", n, pathname, pattern, flags);
+	//printk("__match_pathname(%d, '%s', '%s', %d)\n", n, pathname, pattern, flags);
 	if (n >= 8) return SEARCH_MATCH_OVERFLOW;
 	while (1) {
 		switch (pattern[0]) {
@@ -1086,7 +1087,7 @@ static enum search_matched match_pathname (const char *pathname, const char *pat
 {
 	enum search_matched status = SEARCH_MATCH_FAILURE;
 	const char *path = pathname;
-	printk("match_pathname(\"%s\", \"%s\", %d)\n", pathname, pattern, flags);
+	//printk("match_pathname(\"%s\", \"%s\", %d)\n", pathname, pattern, flags);
 	for (; path; path = strchr(path+1, '/')) {
 		const char *patt = pattern;
 		for (; patt; patt = strchrskip(patt+1, '|')) {
@@ -1102,7 +1103,7 @@ static enum search_matched match_pathname (const char *pathname, const char *pat
 }
 
 #define TREE_DEPTH  16
-#define SEARCH_BUF  64 /* FIXME PATH_MAX<<4 */
+#define SEARCH_BUF  PATH_MAX<<4 /* this is 65k */
 
 static int search_isrecursive (const char *pattern)
 {
@@ -1145,9 +1146,11 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 {
 	int result = 0;
 	int status = 0;
-	struct file *fp = ds[n].fp;
+	struct file *fp;
 	char *s;
 	int recursive = search_isrecursive(pattern);
+
+	//printk("search_directory(%p, %d, %zu, %p, %p, %d, %zu, %p)\n", ds, n, (size_t)base, path, pattern, flags, *len, buf);
 
 	if (n >= TREE_DEPTH)
 		return 0;
@@ -1162,12 +1165,9 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 
 	/* canonicalize path */
 	s = dentry_path(fp->f_dentry, path, PATH_MAX+1);
-	if (IS_ERR(s)) {
-		status = filp_close(fp, current->files);
+	if (IS_ERR(s))
 		goto exit;
-	}
 	memmove(path, s, strlen(s)+1);
-	printk("reading dir `%s'\n", path);
 
 	if (base == 0) /* not set? */
 		base = strlen(path);
@@ -1175,7 +1175,6 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 	do {
 		ds[n].next = ds[n].entries;
 		status = vfs_readdir(fp, search_filldir, &ds[n]);
-		printk("vfs_readdir: %d\n", status);
 		if (status)
 			goto exit;
 
@@ -1189,11 +1188,45 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 
 				strcat(path, "/");
 				strcat(path, entry);
-				printk("path: `%s' type: %c\n", path, type);
+				//printk("path: `%s' type: %c\n", path, type);
 
 				how = match_pathname(path+base, pattern, flags);
 				if (how == SEARCH_MATCH_SUCCESS) {
-					printk("matched `%s'\n", path);
+					struct kstat stat;
+					struct path entry_path;
+					//printk("matched `%s'\n", path);
+					status = vfs_path_lookup(fp->f_path.dentry, fp->f_path.mnt, entry, 0, &entry_path);
+					if (status)
+						goto exit;
+					status = vfs_getattr(entry_path.mnt, entry_path.dentry, &stat);
+					path_put(&entry_path);
+					if (status)
+						goto exit;
+//u64     ino;
+//dev_t       dev;
+//umode_t     mode;
+//unsigned int    nlink;
+//uid_t       uid;
+//gid_t       gid;
+//dev_t       rdev;
+//loff_t      size;
+//struct timespec  atime;
+//struct timespec mtime;
+//struct timespec ctime;
+//unsigned long   blksize;
+//unsigned long long  blocks;
+
+					//printk("ino %ld\n", (long int)stat.ino);
+					//printk("mode %ld\n", (long int)stat.mode);
+					//printk("nlink %ld\n", (long int)stat.nlink);
+					//printk("uid %ld\n", (long int)stat.uid);
+					//printk("gid %ld\n", (long int)stat.gid);
+					//printk("size %ld\n", (long int)stat.size);
+					//printk("atime %ld\n", (long int)stat.atime.tv_sec);
+					//printk("mtime %ld\n", (long int)stat.mtime.tv_sec);
+					//printk("ctime %ld\n", (long int)stat.ctime.tv_sec);
+					//printk("blksize %ld\n", (long int)stat.blksize);
+					//printk("blocks %ld\n", (long int)stat.blocks);
 					if (strlen(path)+2 <= *len) {
 						if (copy_to_user(*buf, path, strlen(path)))
 							goto efault;
@@ -1208,7 +1241,6 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 					}
 				}
 				if (type == 'd' && strcmp(entry, ".") != 0 && strcmp(entry, "..") != 0 && (how == SEARCH_MATCH_PARTIAL || recursive)) {
-					printk("partial match | recursive `%s'\n", path);
 					status = search_directory(ds, n+1, base, path, pattern, flags, len, buf);
 					if (status >= 0)
 						result += status;
@@ -1224,17 +1256,14 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 exit:
 	goto exitn;
 exitn:
-exit0:
 	filp_close(fp, current->files); /* no need to check error? */
 	goto out;
 
 efault:
-	printk("EFAULT\n");
 	status = -EFAULT;
 	goto out;
 
 out:
-	printk("out status = %d; result = %d\n", status, result);
 	if (status)
 		return status;
 	else
@@ -1281,41 +1310,24 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 		goto exit3;
 	}
 
-	printk("search: %p:'%s' %p:'%s' %d %zu %p\n", paths, kpaths, pattern, kpattern, flags, len, buf);
+	printk("search(%p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", paths, kpaths, pattern, kpattern, flags, len, buf);
 
 	n = kpaths;
 	while ((c = strsep(&n, ":")) != NULL) {
 		strcpy(path, c);
 		/* do matching */
 
-		printk("searching `%s'\n", path);
-
 		status = search_directory(ds, 0, 0, path, kpattern, flags, &len, &buf);
-		printk("status = %d\n", status);
 		if (status >= 0)
 			result += status;
 		else
 			goto exit;
 	}
 	status = result;
-		// use d_lookup
-		// static const struct qstr name = { .name = "/", .len = 1 };
-		/**
-		* d_lookup - search for a dentry
-		* @parent: parent dentry
-		* @name: qstr of name we wish to find
-		* Returns: dentry, or NULL
-		*
-		* d_lookup searches the children of the parent dentry for the name in
-		* question. If the dentry is found its reference count is incremented and the
-		* dentry is returned. The caller must use dput to free the entry when it has
-		* finished using it. %NULL is returned if the dentry does not exist.
-		*/
-		//struct dentry *d_lookup(struct dentry *parent, struct qstr *name)
+
 exit:
 	goto exitn;
 exitn:
-exit4:
 	kfree(ds);
 exit3:
 	putname(path);
