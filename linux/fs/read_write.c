@@ -1150,7 +1150,7 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 	char *s;
 	int recursive = search_isrecursive(pattern);
 
-	printk("search_directory(%p, %d, %zu, %p, %p, %d, %zu, %p)\n", ds, n, (size_t)base, path, pattern, flags, *len, buf);
+	printk("search_directory(%p, %d, %zu, %p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", ds, n, (size_t)base, path, path, pattern, pattern, flags, *len, buf);
 
 	if (n >= TREE_DEPTH)
 		return 0;
