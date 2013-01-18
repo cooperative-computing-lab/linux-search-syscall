@@ -1150,7 +1150,7 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 	char *s;
 	int recursive = search_isrecursive(pattern);
 
-	//printk("search_directory(%p, %d, %zu, %p, %p, %d, %zu, %p)\n", ds, n, (size_t)base, path, pattern, flags, *len, buf);
+	printk("search_directory(%p, %d, %zu, %p, %p, %d, %zu, %p)\n", ds, n, (size_t)base, path, pattern, flags, *len, buf);
 
 	if (n >= TREE_DEPTH)
 		return 0;
@@ -1174,9 +1174,9 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 
 	do {
 		ds[n].next = ds[n].entries;
-		printk("readdir `%s'\n", path);
+		//printk("readdir `%s'\n", path);
 		status = vfs_readdir(fp, search_filldir, &ds[n]);
-		printk("= %d\n", status);
+		//printk("= %d\n", status);
 		if (status)
 			goto exit;
 
@@ -1190,13 +1190,13 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 
 				strcat(path, "/");
 				strcat(path, entry);
-				printk("path: `%s' type: %c\n", path, type);
+				//printk("path: `%s' type: %c\n", path, type);
 
 				how = match_pathname(path+base, pattern, flags);
 				if (how == SEARCH_MATCH_SUCCESS) {
 					struct kstat stat;
 					struct path entry_path;
-					printk("matched `%s'\n", path);
+					//printk("matched `%s'\n", path);
 					status = vfs_path_lookup(fp->f_path.dentry, fp->f_path.mnt, entry, 0, &entry_path);
 					if (status)
 						goto exit;
