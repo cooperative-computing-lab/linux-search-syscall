@@ -1164,7 +1164,7 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 	}
 
 	/* canonicalize path */
-	s = dentry_path(fp->f_dentry, path, PATH_MAX+1);
+	s = d_absolute_path(&fp->f_path, path, PATH_MAX+1);
 	if (IS_ERR(s))
 		goto exit;
 	memmove(path, s, strlen(s)+1);
@@ -1190,13 +1190,13 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 
 				strcat(path, "/");
 				strcat(path, entry);
-				//printk("path: `%s' type: %c\n", path, type);
+				printk("path: `%s' type: %c\n", path, type);
 
 				how = match_pathname(path+base, pattern, flags);
 				if (how == SEARCH_MATCH_SUCCESS) {
 					struct kstat stat;
 					struct path entry_path;
-					//printk("matched `%s'\n", path);
+					printk("matched `%s'\n", path);
 					status = vfs_path_lookup(fp->f_path.dentry, fp->f_path.mnt, entry, 0, &entry_path);
 					if (status)
 						goto exit;
