@@ -1142,6 +1142,86 @@ static int search_filldir (void *userdata, const char *name, int namelen, loff_t
 	return 0;
 }
 
+//static long cp_new_stat64(struct kstat *stat, struct stat64 __user *statbuf)
+//{
+//	struct stat64 tmp;
+//
+//	memset(&tmp, 0, sizeof(struct stat64));
+//#ifdef CONFIG_MIPS
+//	/* mips has weird padding, so we don't get 64 bits there */
+//	if (!new_valid_dev(stat->dev) || !new_valid_dev(stat->rdev))
+//		return -EOVERFLOW;
+//	tmp.st_dev = new_encode_dev(stat->dev);
+//	tmp.st_rdev = new_encode_dev(stat->rdev);
+//#else
+//	tmp.st_dev = huge_encode_dev(stat->dev);
+//	tmp.st_rdev = huge_encode_dev(stat->rdev);
+//#endif
+//	tmp.st_ino = stat->ino;
+//	if (sizeof(tmp.st_ino) < sizeof(stat->ino) && tmp.st_ino != stat->ino)
+//		return -EOVERFLOW;
+//#ifdef STAT64_HAS_BROKEN_ST_INO
+//	tmp.__st_ino = stat->ino;
+//#endif
+//	tmp.st_mode = stat->mode;
+//	tmp.st_nlink = stat->nlink;
+//	tmp.st_uid = stat->uid;
+//	tmp.st_gid = stat->gid;
+//	tmp.st_atime = stat->atime.tv_sec;
+//	tmp.st_atime_nsec = stat->atime.tv_nsec;
+//	tmp.st_mtime = stat->mtime.tv_sec;
+//	tmp.st_mtime_nsec = stat->mtime.tv_nsec;
+//	tmp.st_ctime = stat->ctime.tv_sec;
+//	tmp.st_ctime_nsec = stat->ctime.tv_nsec;
+//	tmp.st_size = stat->size;
+//	tmp.st_blocks = stat->blocks;
+//	tmp.st_blksize = stat->blksize;
+//	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
+//}
+
+static int copy_search_result (char __user **userbuf, size_t *len, const char *path, const struct kstat *stat)
+{
+	#define SEARCH_STAT_SIZE  128
+	char status[8];
+	char buf[SEARCH_STAT_SIZE];
+
+	sprintf(status, "0|");
+
+	sprintf(buf, "|%zd,%zd,%d,%zd,%d,%d,%zd,%zd,%zd,%zd,%zd,%zd,%zd|",
+		(ssize_t)huge_encode_dev(stat->dev),
+		(ssize_t)stat->ino,
+		(int)stat->mode,
+		(ssize_t)stat->nlink,
+		(int)stat->uid,
+		(int)stat->gid,
+		(ssize_t)huge_encode_dev(stat->rdev),
+		(ssize_t)stat->size,
+		(ssize_t)stat->atime.tv_sec,
+		(ssize_t)stat->mtime.tv_sec,
+		(ssize_t)stat->ctime.tv_sec,
+		(ssize_t)stat->blksize,
+		(ssize_t)stat->blocks
+		);
+
+	if ((strlen(status)+strlen(path)+strlen(buf)+2) <= *len) { /* double NUL terminator */
+		if (copy_to_user(*userbuf, status, strlen(status)))
+			return -EFAULT;
+		*userbuf += strlen(status); *len -= strlen(status);
+		if (copy_to_user(*userbuf, path, strlen(path)))
+			return -EFAULT;
+		*userbuf += strlen(path); *len -= strlen(path);
+		if (copy_to_user(*userbuf, buf, strlen(buf)))
+			return -EFAULT;
+		*userbuf += strlen(buf); *len -= strlen(buf);
+		if (copy_to_user(*userbuf, "\0\0", 2))
+			return -EFAULT;
+        /* NUL does not delimit for parrot implementation */
+		return 0;
+	} else {
+		return -ERANGE;
+	}
+}
+
 static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char *path, char *pattern, int flags, size_t *len, char __user **buf)
 {
 	int result = 0;
@@ -1150,7 +1230,7 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 	char *s;
 	int recursive = search_isrecursive(pattern);
 
-	printk("search_directory(%p, %d, %zu, %p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", ds, n, (size_t)base, path, path, pattern, pattern, flags, *len, buf);
+	printk("search_directory(%p, %d, %zu, %p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", ds, n, (size_t)base, path, path, pattern, pattern, flags, *len, *buf);
 
 	if (n >= TREE_DEPTH)
 		return 0;
@@ -1204,43 +1284,10 @@ static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char 
 					path_put(&entry_path);
 					if (status)
 						goto exit;
-//u64     ino;
-//dev_t       dev;
-//umode_t     mode;
-//unsigned int    nlink;
-//uid_t       uid;
-//gid_t       gid;
-//dev_t       rdev;
-//loff_t      size;
-//struct timespec  atime;
-//struct timespec mtime;
-//struct timespec ctime;
-//unsigned long   blksize;
-//unsigned long long  blocks;
-
-					//printk("ino %ld\n", (long int)stat.ino);
-					//printk("mode %ld\n", (long int)stat.mode);
-					//printk("nlink %ld\n", (long int)stat.nlink);
-					//printk("uid %ld\n", (long int)stat.uid);
-					//printk("gid %ld\n", (long int)stat.gid);
-					//printk("size %ld\n", (long int)stat.size);
-					//printk("atime %ld\n", (long int)stat.atime.tv_sec);
-					//printk("mtime %ld\n", (long int)stat.mtime.tv_sec);
-					//printk("ctime %ld\n", (long int)stat.ctime.tv_sec);
-					//printk("blksize %ld\n", (long int)stat.blksize);
-					//printk("blocks %ld\n", (long int)stat.blocks);
-					if (strlen(path)+2 <= *len) {
-						if (copy_to_user(*buf, path, strlen(path)))
-							goto efault;
-						copy_to_user(*buf+strlen(path), "\0\0", 2);
-						*len -= strlen(path)+1;
-						*buf += strlen(path)+1;
-						result += 1;
-					} else {
-						/* buffer full, this is an error */
-						status = -ERANGE;
+					status = copy_search_result(buf, len, path, &stat);
+					if (status)
 						goto exit;
-					}
+					result += 1;
 				}
 				if (type == 'd' && strcmp(entry, ".") != 0 && strcmp(entry, "..") != 0 && (how == SEARCH_MATCH_PARTIAL || recursive)) {
 					status = search_directory(ds, n+1, base, path, pattern, flags, len, buf);
@@ -1261,10 +1308,6 @@ exitn:
 	filp_close(fp, current->files); /* no need to check error? */
 	goto out;
 
-efault:
-	status = -EFAULT;
-	goto out;
-
 out:
 	if (status)
 		return status;
@@ -1279,6 +1322,7 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 	char *c;
 	char *n;
 
+	char *buf_start = buf;
 	char *path;
 	char *kpaths;
 	char *kpattern;
@@ -1323,6 +1367,15 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 		if (status >= 0)
 			result += status;
 		else
+			goto exit;
+	}
+	if (buf != buf_start) {
+		/* this is a sad hack because the '|' delimiter design
+		 * makes programming this rather difficult.
+		 * We remove the final '|' that was added.
+		 */
+		status = copy_to_user(buf-1, "\0\0", 2);
+		if (status)
 			goto exit;
 	}
 	status = result;
