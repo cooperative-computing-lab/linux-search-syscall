@@ -1114,15 +1114,47 @@ static int search_isrecursive (const char *pattern)
 	return 0;
 }
 
-struct dir_search {
+struct search_directory {
+	/* normal stack variables */
+	int status;
+	int result;
 	struct file *fp;
+	char *dir;;
+
+	/* large state */
 	char entries[SEARCH_BUF];
 	char *next;
+
+	/* matching an entry */
+	char *entry;
+	enum search_matched how;
+	struct kstat stat;
+	struct path path;
+	char type;
+};
+
+struct dir_search {
+	/* normal stack variables */
+	int result;
+
+	char *paths;
+	char *pattern;
+	int flags;
+	char __user *buf;
+	char __user *next;
+	size_t len;
+
+	int recursive;
+	size_t base;
+
+	char path[PATH_MAX+1];
+
+    struct search_directory dirs[TREE_DEPTH];
 };
 
 static int search_filldir (void *userdata, const char *name, int namelen, loff_t offset, u64 ino, unsigned int d_type)
 {
-	struct dir_search *ds = (struct dir_search *) userdata;
+	struct search_directory *ds = (struct search_directory *) userdata;
 
 	if ((int)(SEARCH_BUF-(ds->next-ds->entries)) < namelen+3) {
 		return -EINVAL; /* too many entries */
@@ -1222,174 +1254,169 @@ static int copy_search_result (char __user **userbuf, size_t *len, const char *p
 	}
 }
 
-static int search_directory (struct dir_search *ds, int n, ptrdiff_t base, char *path, char *pattern, int flags, size_t *len, char __user **buf)
+static int abspath (struct file *fp, char *path)
 {
-	int result = 0;
-	int status = 0;
-	struct file *fp;
-	char *s;
-	int recursive = search_isrecursive(pattern);
+	/* canonicalize path */
+	char *s = d_absolute_path(&fp->f_path, path, PATH_MAX);
+	if (IS_ERR(s))
+		return PTR_ERR(s);
+	memmove(path, s, strlen(s)+1);
+	return 0;
+}
 
-	printk("search_directory(%p, %d, %zu, %p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", ds, n, (size_t)base, path, path, pattern, pattern, flags, *len, *buf);
+static int search_directory (struct dir_search *ds, int n)
+{
+	printk("search_directory(%p, %d, %zu, %p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", ds, n, ds->base, ds->path, ds->path, ds->pattern, ds->pattern, ds->flags, ds->len, ds->buf);
 
 	if (n >= TREE_DEPTH)
 		return 0;
 
-	fp = ds[n].fp = filp_open(path, O_DIRECTORY|O_RDONLY|O_LARGEFILE, 0);
-	if (IS_ERR(fp)) {
-		status = PTR_ERR(fp);
-		if (status == -ENOENT)
+	ds->dirs[n].status = 0;
+	ds->dirs[n].result = 0;
+
+	ds->dirs[n].fp = filp_open(ds->path, O_DIRECTORY|O_RDONLY|O_LARGEFILE, 0);
+	if (IS_ERR(ds->dirs[n].fp)) {
+		ds->dirs[n].status = PTR_ERR(ds->dirs[n].fp);
+		if (ds->dirs[n].status == -ENOENT)
 			return 0;
 		goto out;
 	}
 
-	/* canonicalize path */
-	s = d_absolute_path(&fp->f_path, path, PATH_MAX+1);
-	if (IS_ERR(s))
+	if (abspath(ds->dirs[n].fp, ds->path))
 		goto exit;
-	memmove(path, s, strlen(s)+1);
 
-	if (base == 0) /* not set? */
-		base = strlen(path);
+	if (ds->base == 0) /* not set? */
+		ds->base = strlen(ds->path);
 
 	do {
-		ds[n].next = ds[n].entries;
-		//printk("readdir `%s'\n", path);
-		status = vfs_readdir(fp, search_filldir, &ds[n]);
-		//printk("= %d\n", status);
-		if (status)
+		ds->dirs[n].next = ds->dirs[n].entries;
+		ds->dirs[n].status = vfs_readdir(ds->dirs[n].fp, search_filldir, &ds->dirs[n]);
+		if (ds->dirs[n].status)
 			goto exit;
 
-		if (ds[n].next > ds[n].entries) {
-			char *entry;
-			char *pathend = path+strlen(path);
-			for (entry = ds[n].entries; *entry; entry = entry+strlen(entry)+1) {
-				enum search_matched how;
-				char type = *entry;
-				entry += 1;
+		if (ds->dirs[n].next > ds->dirs[n].entries) {
+			ds->dirs[n].dir = ds->path+strlen(ds->path);
+			for (ds->dirs[n].entry = ds->dirs[n].entries; *ds->dirs[n].entry; ds->dirs[n].entry = ds->dirs[n].entry+strlen(ds->dirs[n].entry)+1) {
+				ds->dirs[n].type = *ds->dirs[n].entry;
+				ds->dirs[n].entry += 1;
 
-				strcat(path, "/");
-				strcat(path, entry);
-				printk("path: `%s' type: %c\n", path, type);
+				strcat(ds->path, "/");
+				strcat(ds->path, ds->dirs[n].entry);
+				printk("path: `%s' type: %c\n", ds->path, ds->dirs[n].type);
 
-				how = match_pathname(path+base, pattern, flags);
-				if (how == SEARCH_MATCH_SUCCESS) {
-					struct kstat stat;
-					struct path entry_path;
-					printk("matched `%s'\n", path);
-					status = vfs_path_lookup(fp->f_path.dentry, fp->f_path.mnt, entry, 0, &entry_path);
-					if (status)
+				ds->dirs[n].how = match_pathname(ds->path+ds->base, ds->pattern, ds->flags);
+				if (ds->dirs[n].how == SEARCH_MATCH_SUCCESS) {
+					printk("matched `%s'\n", ds->path);
+					ds->dirs[n].status = vfs_path_lookup(ds->dirs[n].fp->f_path.dentry, ds->dirs[n].fp->f_path.mnt, ds->dirs[n].entry, 0, &ds->dirs[n].path);
+					if (ds->dirs[n].status)
 						goto exit;
-					status = vfs_getattr(entry_path.mnt, entry_path.dentry, &stat);
-					path_put(&entry_path);
-					if (status)
+					ds->dirs[n].status = vfs_getattr(ds->dirs[n].path.mnt, ds->dirs[n].path.dentry, &ds->dirs[n].stat);
+					path_put(&ds->dirs[n].path);
+					if (ds->dirs[n].status)
 						goto exit;
-					status = copy_search_result(buf, len, path, &stat);
-					if (status)
+					ds->dirs[n].status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
+					if (ds->dirs[n].status)
 						goto exit;
-					result += 1;
+					ds->dirs[n].result += 1;
 				}
-				if (type == 'd' && strcmp(entry, ".") != 0 && strcmp(entry, "..") != 0 && (how == SEARCH_MATCH_PARTIAL || recursive)) {
-					status = search_directory(ds, n+1, base, path, pattern, flags, len, buf);
-					if (status >= 0)
-						result += status;
+				if (ds->dirs[n].type == 'd' && strcmp(ds->dirs[n].entry, ".") != 0 && strcmp(ds->dirs[n].entry, "..") != 0 && (ds->dirs[n].how == SEARCH_MATCH_PARTIAL || ds->recursive)) {
+					ds->dirs[n].status = search_directory(ds, n+1);
+					if (ds->dirs[n].status >= 0)
+						ds->dirs[n].result += ds->dirs[n].status;
 					else
 						goto exit;
 				} /* else SEARCH_MATCH_FAILURE */
 
-				*pathend = '\0';
+				*ds->dirs[n].dir = '\0';
 			}
 		}
-	} while (ds[n].next > ds[n].entries);
+	} while (ds->dirs[n].next > ds->dirs[n].entries);
 
 exit:
 	goto exitn;
 exitn:
-	filp_close(fp, current->files); /* no need to check error? */
+	filp_close(ds->dirs[n].fp, current->files); /* no need to check error? */
 	goto out;
 
 out:
-	if (status)
-		return status;
+	if (ds->dirs[n].status)
+		return ds->dirs[n].status;
 	else
-		return result;
+		return ds->dirs[n].result;
 }
 
-SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern, int, flags, size_t, len, char __user *, buf)
+SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern, int, flags, char __user *, buf, size_t, len)
 {
-	int result = 0;
 	int status = 0;
+	struct dir_search *ds;
+
 	char *c;
 	char *n;
 
-	char *buf_start = buf;
-	char *path;
-	char *kpaths;
-	char *kpattern;
-
-	struct dir_search *ds;
-
-	if (!access_ok(VERIFY_WRITE, buf, len))
-		return -EFAULT;
-
-	kpaths = getname(paths);
-	if (IS_ERR(kpaths)) {
-		status = PTR_ERR(kpaths);
+	if (!access_ok(VERIFY_WRITE, buf, len)) {
+		status = -EFAULT;
 		goto exit0;
 	}
 
-	kpattern = getname(pattern);
-	if (IS_ERR(kpattern)) {
-		status = PTR_ERR(kpattern);
+	ds = kmalloc(sizeof(struct dir_search), GFP_KERNEL);
+	if (!ds) {
+		status = -ENOMEM;
+		goto exit0;
+	}
+
+	ds->result = 0;
+
+	ds->paths = getname(paths);
+	if (IS_ERR(ds->paths)) {
+		status = PTR_ERR(ds->paths);
 		goto exit1;
 	}
 
-	path = __getname();
-	if (IS_ERR(path)) {
-		status = PTR_ERR(path);
+	ds->pattern = getname(pattern);
+	if (IS_ERR(ds->pattern)) {
+		status = PTR_ERR(ds->pattern);
 		goto exit2;
 	}
 
-	ds = kmalloc(sizeof(struct dir_search)*TREE_DEPTH, GFP_KERNEL);
-	if (!ds) {
-		status = -ENOMEM;
-		goto exit3;
-	}
+	ds->flags = flags;
+	ds->buf = ds->next = buf;
+	ds->len = len;
 
-	printk("search(%p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", paths, kpaths, pattern, kpattern, flags, len, buf);
+	ds->recursive = search_isrecursive(ds->pattern);
+	ds->base = 0;
 
-	n = kpaths;
+	printk("search(%p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", paths, ds->paths, pattern, ds->pattern, ds->flags, ds->len, ds->buf);
+
+	n = ds->paths;
 	while ((c = strsep(&n, ":")) != NULL) {
-		strcpy(path, c);
+		strcpy(ds->path, c);
 		/* do matching */
 
-		status = search_directory(ds, 0, 0, path, kpattern, flags, &len, &buf);
+		status = search_directory(ds, 0);
 		if (status >= 0)
-			result += status;
+			ds->result += status;
 		else
 			goto exit;
 	}
-	if (buf != buf_start) {
+	if (ds->buf != ds->next) {
 		/* this is a sad hack because the '|' delimiter design
 		 * makes programming this rather difficult.
 		 * We remove the final '|' that was added.
 		 */
-		status = copy_to_user(buf-1, "\0\0", 2);
+		status = copy_to_user(ds->next-1, "\0\0", 2);
 		if (status)
 			goto exit;
 	}
-	status = result;
+	status = ds->result;
 
 exit:
 	goto exitn;
 exitn:
-	kfree(ds);
-exit3:
-	putname(path);
+	putname(ds->pattern);
 exit2:
-	putname(kpattern);
+	putname(ds->paths);
 exit1:
-	putname(kpaths);
+	kfree(ds);
 exit0:
     return status;
 }
