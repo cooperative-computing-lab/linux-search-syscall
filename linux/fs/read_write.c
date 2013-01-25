@@ -1105,6 +1105,14 @@ static enum search_matched match_pathname (const char *pathname, const char *pat
 #define TREE_DEPTH  16
 #define SEARCH_BUF  (PATH_MAX<<4)
 
+#define SEARCH_STOPATFIRST (1<<0)
+#define SEARCH_METADATA    (1<<1)
+#define SEARCH_INCLUDEROOT (1<<2)
+#define SEARCH_PERIOD      (1<<3)
+#define SEARCH_R_OK        (1<<4)
+#define SEARCH_W_OK        (1<<5)
+#define SEARCH_X_OK        (1<<6)
+
 static int search_isrecursive (const char *pattern)
 {
 	for (; pattern; pattern = strchrskip(pattern+1, '|')) {
@@ -1119,7 +1127,7 @@ struct search_directory {
 	int status;
 	int result;
 	struct file *fp;
-	char *dir;;
+	char *dir;
 
 	/* large state */
 	char entries[SEARCH_BUF];
@@ -1211,15 +1219,14 @@ static int search_filldir (void *userdata, const char *name, int namelen, loff_t
 //	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 //}
 
-static int copy_search_result (char __user **userbuf, size_t *len, const char *path, const struct kstat *stat)
+static int copy_search_result (char __user **buf, size_t *len, const char *path, const struct kstat *stat)
 {
-	#define SEARCH_STAT_SIZE  128
 	char status[8];
-	char buf[SEARCH_STAT_SIZE];
+	char statstr[256];
 
 	sprintf(status, "0|");
 
-	sprintf(buf, "|%zd,%zd,%d,%zd,%d,%d,%zd,%zd,%zd,%zd,%zd,%zd,%zd|",
+	sprintf(statstr, "|%zd,%zd,%d,%zd,%d,%d,%zd,%zd,%zd,%zd,%zd,%zd,%zd|",
 		(ssize_t)huge_encode_dev(stat->dev),
 		(ssize_t)stat->ino,
 		(int)stat->mode,
@@ -1235,17 +1242,17 @@ static int copy_search_result (char __user **userbuf, size_t *len, const char *p
 		(ssize_t)stat->blocks
 		);
 
-	if ((strlen(status)+strlen(path)+strlen(buf)+2) <= *len) { /* double NUL terminator */
-		if (copy_to_user(*userbuf, status, strlen(status)))
+	if ((strlen(status)+strlen(path)+strlen(statstr)+2) <= *len) { /* double NUL terminator */
+		if (copy_to_user(*buf, status, strlen(status)))
 			return -EFAULT;
-		*userbuf += strlen(status); *len -= strlen(status);
-		if (copy_to_user(*userbuf, path, strlen(path)))
+		*buf += strlen(status); *len -= strlen(status);
+		if (copy_to_user(*buf, path, strlen(path)))
 			return -EFAULT;
-		*userbuf += strlen(path); *len -= strlen(path);
-		if (copy_to_user(*userbuf, buf, strlen(buf)))
+		*buf += strlen(path); *len -= strlen(path);
+		if (copy_to_user(*buf, statstr, strlen(statstr)))
 			return -EFAULT;
-		*userbuf += strlen(buf); *len -= strlen(buf);
-		if (copy_to_user(*userbuf, "\0\0", 2))
+		*buf += strlen(statstr); *len -= strlen(statstr);
+		if (copy_to_user(*buf, "\0\0", 2))
 			return -EFAULT;
         /* NUL does not delimit for parrot implementation */
 		return 0;
@@ -1266,7 +1273,7 @@ static int abspath (struct file *fp, char *path)
 
 static int search_directory (struct dir_search *ds, int n)
 {
-	printk("search_directory(%p, %d, %zu, %p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", ds, n, ds->base, ds->path, ds->path, ds->pattern, ds->pattern, ds->flags, ds->len, ds->buf);
+	//printk("search_directory(%p, %d, %zu, %p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", ds, n, ds->base, ds->path, ds->path, ds->pattern, ds->pattern, ds->flags, ds->len, ds->buf);
 
 	if (n >= TREE_DEPTH)
 		return 0;
@@ -1277,7 +1284,7 @@ static int search_directory (struct dir_search *ds, int n)
 	ds->dirs[n].fp = filp_open(ds->path, O_DIRECTORY|O_RDONLY|O_LARGEFILE, 0);
 	if (IS_ERR(ds->dirs[n].fp)) {
 		ds->dirs[n].status = PTR_ERR(ds->dirs[n].fp);
-		if (ds->dirs[n].status == -ENOENT)
+		if (ds->dirs[n].status == -ENOENT || ds->dirs[n].status == -EPERM || ds->dirs[n].status == -EACCES || ds->dirs[n].status == -ENODEV)
 			return 0;
 		goto out;
 	}
@@ -1302,11 +1309,11 @@ static int search_directory (struct dir_search *ds, int n)
 
 				strcat(ds->path, "/");
 				strcat(ds->path, ds->dirs[n].entry);
-				printk("path: `%s' type: %c\n", ds->path, ds->dirs[n].type);
+				//printk("path: `%s' type: %c\n", ds->path, ds->dirs[n].type);
 
 				ds->dirs[n].how = match_pathname(ds->path+ds->base, ds->pattern, ds->flags);
 				if (ds->dirs[n].how == SEARCH_MATCH_SUCCESS) {
-					printk("matched `%s'\n", ds->path);
+					//printk("matched `%s'\n", ds->path);
 					ds->dirs[n].status = vfs_path_lookup(ds->dirs[n].fp->f_path.dentry, ds->dirs[n].fp->f_path.mnt, ds->dirs[n].entry, 0, &ds->dirs[n].path);
 					if (ds->dirs[n].status)
 						goto exit;
@@ -1314,16 +1321,24 @@ static int search_directory (struct dir_search *ds, int n)
 					path_put(&ds->dirs[n].path);
 					if (ds->dirs[n].status)
 						goto exit;
-					ds->dirs[n].status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
+					if (ds->flags & SEARCH_INCLUDEROOT)
+						ds->dirs[n].status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
+					else
+						ds->dirs[n].status = copy_search_result(&ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
 					if (ds->dirs[n].status)
 						goto exit;
 					ds->dirs[n].result += 1;
+					if (ds->flags & SEARCH_STOPATFIRST)
+						goto exit;
 				}
 				if (ds->dirs[n].type == 'd' && strcmp(ds->dirs[n].entry, ".") != 0 && strcmp(ds->dirs[n].entry, "..") != 0 && (ds->dirs[n].how == SEARCH_MATCH_PARTIAL || ds->recursive)) {
 					ds->dirs[n].status = search_directory(ds, n+1);
-					if (ds->dirs[n].status >= 0)
+					if (ds->dirs[n].status >= 0) {
 						ds->dirs[n].result += ds->dirs[n].status;
-					else
+						/* check if we found something and STOPATFIRST is set */
+						if (ds->dirs[n].result > 0 && ds->flags & SEARCH_STOPATFIRST)
+							goto exit;
+					} else
 						goto exit;
 				} /* else SEARCH_MATCH_FAILURE */
 
@@ -1383,15 +1398,15 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 	ds->len = len;
 
 	ds->recursive = search_isrecursive(ds->pattern);
-	ds->base = 0;
 
-	printk("search(%p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", paths, ds->paths, pattern, ds->pattern, ds->flags, ds->len, ds->buf);
+	//printk("search(%p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", paths, ds->paths, pattern, ds->pattern, ds->flags, ds->len, ds->buf);
 
 	n = ds->paths;
-	while ((c = strsep(&n, ":")) != NULL) {
+	while ((c = strsep(&n, "|")) != NULL) {
 		strcpy(ds->path, c);
 		/* do matching */
 
+		ds->base = 0; /* reset base to 0 as we are searching a new top-level directory */
 		status = search_directory(ds, 0);
 		if (status >= 0)
 			ds->result += status;
