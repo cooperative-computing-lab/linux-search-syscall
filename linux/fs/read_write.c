@@ -16,6 +16,7 @@
 #include <linux/pagemap.h>
 #include <linux/splice.h>
 #include <linux/namei.h>
+#include <linux/fs_struct.h>
 #include "read_write.h"
 
 #include <asm/uaccess.h>
@@ -1010,8 +1011,7 @@ SYSCALL_DEFINE4(sendfile64, int, out_fd, int, in_fd, loff_t __user *, offset, si
 
 /* search
    TODO
-   	  * leading forward slash == non recursive
-	  * |
+        * If top-level directory (base) is a link, then the output path is wrong. For pattern case.
 
 	Patterns:
 		* ? any char
@@ -1032,6 +1032,18 @@ static const char *strchrskip (const char *s, int c)
 	s = strchr(s, c);
 	if (s) s+=1;
 	return s;
+}
+
+static int ispattern (const char *pattern)
+{
+	/* no forward slash at start indicates pattern */
+	if (*pattern != '/') return 1;
+	for (; *pattern; pattern += 1) {
+		char c = *pattern;
+		if (c == '*' || c == '?' || c == '|')
+			return 1;
+	}
+	return 0;
 }
 
 #define collapse_forwardslash(p) do { while (*(p) == '/') (p)++; } while (0)
@@ -1124,8 +1136,6 @@ static int search_isrecursive (const char *pattern)
 
 struct search_directory {
 	/* normal stack variables */
-	int status;
-	int result;
 	struct file *fp;
 	char *dir;
 
@@ -1143,7 +1153,8 @@ struct search_directory {
 
 struct dir_search {
 	/* normal stack variables */
-	int result;
+	int status;
+	int results;
 
 	char *paths;
 	char *pattern;
@@ -1224,6 +1235,8 @@ static int copy_search_result (char __user **buf, size_t *len, const char *path,
 	char status[8];
 	char statstr[256];
 
+	//printk("search: result `%s' ino:%ld mode:%x size:%d\n", path, (long int)stat->ino, (int)stat->mode, (int)stat->size);
+
 	sprintf(status, "0|");
 
 	sprintf(statstr, "|%zd,%zd,%d,%zd,%d,%d,%zd,%zd,%zd,%zd,%zd,%zd,%zd|",
@@ -1261,10 +1274,10 @@ static int copy_search_result (char __user **buf, size_t *len, const char *path,
 	}
 }
 
-static int abspath (struct file *fp, char *path)
+static int abspath (struct path *p, char *path)
 {
 	/* canonicalize path */
-	char *s = d_absolute_path(&fp->f_path, path, PATH_MAX);
+	char *s = d_absolute_path(p, path, PATH_MAX);
 	if (IS_ERR(s))
 		return PTR_ERR(s);
 	memmove(path, s, strlen(s)+1);
@@ -1278,18 +1291,18 @@ static int search_directory (struct dir_search *ds, int n)
 	if (n >= TREE_DEPTH)
 		return 0;
 
-	ds->dirs[n].status = 0;
-	ds->dirs[n].result = 0;
+	ds->status = 0;
 
 	ds->dirs[n].fp = filp_open(ds->path, O_DIRECTORY|O_RDONLY|O_LARGEFILE, 0);
 	if (IS_ERR(ds->dirs[n].fp)) {
-		ds->dirs[n].status = PTR_ERR(ds->dirs[n].fp);
-		if (ds->dirs[n].status == -ENOENT || ds->dirs[n].status == -EPERM || ds->dirs[n].status == -EACCES || ds->dirs[n].status == -ENODEV)
+		ds->status = PTR_ERR(ds->dirs[n].fp);
+		if (ds->status == -ENOENT || ds->status == -EPERM || ds->status == -EACCES || ds->status == -ENODEV)
 			return 0;
 		goto out;
 	}
 
-	if (abspath(ds->dirs[n].fp, ds->path))
+	ds->status = abspath(&ds->dirs[n].fp->f_path, ds->path);
+	if (ds->status)
 		goto exit;
 
 	if (ds->base == 0) /* not set? */
@@ -1297,8 +1310,8 @@ static int search_directory (struct dir_search *ds, int n)
 
 	do {
 		ds->dirs[n].next = ds->dirs[n].entries;
-		ds->dirs[n].status = vfs_readdir(ds->dirs[n].fp, search_filldir, &ds->dirs[n]);
-		if (ds->dirs[n].status)
+		ds->status = vfs_readdir(ds->dirs[n].fp, search_filldir, &ds->dirs[n]);
+		if (ds->status)
 			goto exit;
 
 		if (ds->dirs[n].next > ds->dirs[n].entries) {
@@ -1314,31 +1327,29 @@ static int search_directory (struct dir_search *ds, int n)
 				ds->dirs[n].how = match_pathname(ds->path+ds->base, ds->pattern, ds->flags);
 				if (ds->dirs[n].how == SEARCH_MATCH_SUCCESS) {
 					//printk("matched `%s'\n", ds->path);
-					ds->dirs[n].status = vfs_path_lookup(ds->dirs[n].fp->f_path.dentry, ds->dirs[n].fp->f_path.mnt, ds->dirs[n].entry, 0, &ds->dirs[n].path);
-					if (ds->dirs[n].status)
+					ds->status = vfs_path_lookup(ds->dirs[n].fp->f_path.dentry, ds->dirs[n].fp->f_path.mnt, ds->dirs[n].entry, 0, &ds->dirs[n].path);
+					if (ds->status)
 						goto exit;
-					ds->dirs[n].status = vfs_getattr(ds->dirs[n].path.mnt, ds->dirs[n].path.dentry, &ds->dirs[n].stat);
+					ds->status = vfs_getattr(ds->dirs[n].path.mnt, ds->dirs[n].path.dentry, &ds->dirs[n].stat);
 					path_put(&ds->dirs[n].path);
-					if (ds->dirs[n].status)
+					if (ds->status)
 						goto exit;
 					if (ds->flags & SEARCH_INCLUDEROOT)
-						ds->dirs[n].status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
+						ds->status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
 					else
-						ds->dirs[n].status = copy_search_result(&ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
-					if (ds->dirs[n].status)
+						ds->status = copy_search_result(&ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
+					if (ds->status)
 						goto exit;
-					ds->dirs[n].result += 1;
+					ds->results += 1;
 					if (ds->flags & SEARCH_STOPATFIRST)
 						goto exit;
 				}
 				if (ds->dirs[n].type == 'd' && strcmp(ds->dirs[n].entry, ".") != 0 && strcmp(ds->dirs[n].entry, "..") != 0 && (ds->dirs[n].how == SEARCH_MATCH_PARTIAL || ds->recursive)) {
-					ds->dirs[n].status = search_directory(ds, n+1);
-					if (ds->dirs[n].status >= 0) {
-						ds->dirs[n].result += ds->dirs[n].status;
-						/* check if we found something and STOPATFIRST is set */
-						if (ds->dirs[n].result > 0 && ds->flags & SEARCH_STOPATFIRST)
-							goto exit;
-					} else
+					ds->status = search_directory(ds, n+1);
+					if (ds->status)
+						goto exit;
+					/* check if we found something and STOPATFIRST is set */
+					if (ds->results > 0 && ds->flags & SEARCH_STOPATFIRST)
 						goto exit;
 				} /* else SEARCH_MATCH_FAILURE */
 
@@ -1354,10 +1365,7 @@ exitn:
 	goto out;
 
 out:
-	if (ds->dirs[n].status)
-		return ds->dirs[n].status;
-	else
-		return ds->dirs[n].result;
+	return ds->status;
 }
 
 SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern, int, flags, char __user *, buf, size_t, len)
@@ -1379,7 +1387,7 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 		goto exit0;
 	}
 
-	ds->result = 0;
+	ds->results = 0;
 
 	ds->paths = getname(paths);
 	if (IS_ERR(ds->paths)) {
@@ -1404,14 +1412,63 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 	n = ds->paths;
 	while ((c = strsep(&n, "|")) != NULL) {
 		strcpy(ds->path, c);
-		/* do matching */
 
-		ds->base = 0; /* reset base to 0 as we are searching a new top-level directory */
-		status = search_directory(ds, 0);
-		if (status >= 0)
-			ds->result += status;
-		else
-			goto exit;
+		if (ispattern(ds->pattern)) {
+			ds->base = 0; /* reset base to 0 as we are searching a new top-level directory */
+			status = search_directory(ds, 0);
+			if (status)
+				goto exit;
+			if (ds->results > 0 && ds->flags & SEARCH_STOPATFIRST)
+				break;
+		} else {
+			/* TODO Really this should be merged into search_directory where each path component in the pattern is examined.
+			   If there is no special characters in the pattern, then try to open the component directly and decompose the pattern.
+			   Unfortunately this requires also putting pattern examination in search_directory when it's separate in match_pathname.
+			   This will do for now...
+			 */
+			status = kern_path(ds->path, 0, &ds->dirs[0].path);
+			if (status == -ENOENT)
+				continue;
+			else if (status)
+				goto exit;
+			/* canonicalize path */
+			status = abspath(&ds->dirs[0].path, ds->path);
+			if (status) {
+				path_put(&ds->dirs[0].path);
+				goto exit;
+			}
+			/* here we do another path_lookup and follow symlinks, we didn't the first time because we need the path with the final symlink */
+			path_put(&ds->dirs[0].path);
+			status = kern_path(ds->path, LOOKUP_FOLLOW, &ds->dirs[0].path);
+			if (status == -ENOENT)
+				continue;
+			else if (status)
+				goto exit;
+			ds->base = strlen(ds->path);
+			while (*ds->pattern == '/') ds->pattern += 1; /* remove leading forward slashes */
+			strcat(ds->path, "/");
+			strcat(ds->path, ds->pattern);
+			status = vfs_path_lookup(ds->dirs[0].path.dentry, ds->dirs[0].path.mnt, ds->pattern, 0, &ds->dirs[1].path);
+			path_put(&ds->dirs[0].path);
+			if (status == -ENOENT)
+				continue;
+			else if (status)
+				goto exit;
+			ds->dirs[0].path = ds->dirs[1].path;
+			status = vfs_getattr(ds->dirs[0].path.mnt, ds->dirs[0].path.dentry, &ds->dirs[0].stat);
+			path_put(&ds->dirs[0].path);
+			if (status)
+				goto exit;
+			if (ds->flags & SEARCH_INCLUDEROOT)
+				status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[0].stat);
+			else
+				status = copy_search_result(&ds->next, &ds->len, ds->path+ds->base, &ds->dirs[0].stat);
+			if (status)
+				goto exit;
+			ds->results += 1;
+			if (ds->flags & SEARCH_STOPATFIRST)
+				break;
+		}
 	}
 	if (ds->buf != ds->next) {
 		/* this is a sad hack because the '|' delimiter design
@@ -1422,7 +1479,7 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 		if (status)
 			goto exit;
 	}
-	status = ds->result;
+	status = ds->results;
 
 exit:
 	goto exitn;
