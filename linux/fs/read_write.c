@@ -1168,6 +1168,9 @@ struct dir_search {
 
 	char path[PATH_MAX+1];
 
+	/* result for copy_search_result with some room for stat */
+	char result[PATH_MAX+1024];
+
     struct search_directory dirs[TREE_DEPTH];
 };
 
@@ -1230,44 +1233,41 @@ static int search_filldir (void *userdata, const char *name, int namelen, loff_t
 //	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 //}
 
-static int copy_search_result (char __user **buf, size_t *len, const char *path, const struct kstat *stat)
+static int copy_search_result (struct dir_search *ds, char __user **buf, size_t *len, const char *path, const struct kstat *stat)
 {
-	char status[8];
-	char statstr[256];
+	size_t result_len;
 
 	//printk("search: result `%s' ino:%ld mode:%x size:%d\n", path, (long int)stat->ino, (int)stat->mode, (int)stat->size);
 
-	sprintf(status, "0|");
+	if (ds->flags & SEARCH_METADATA)
+		sprintf(ds->result, "0|%s|%zd,%zd,%d,%zd,%d,%d,%zd,%zd,%zd,%zd,%zd,%zd,%zd|", 
+			path,
+			(ssize_t)huge_encode_dev(stat->dev),
+			(ssize_t)stat->ino,
+			(int)stat->mode,
+			(ssize_t)stat->nlink,
+			(int)stat->uid,
+			(int)stat->gid,
+			(ssize_t)huge_encode_dev(stat->rdev),
+			(ssize_t)stat->size,
+			(ssize_t)stat->atime.tv_sec,
+			(ssize_t)stat->mtime.tv_sec,
+			(ssize_t)stat->ctime.tv_sec,
+			(ssize_t)stat->blksize,
+			(ssize_t)stat->blocks);
+	else
+		sprintf(ds->result, "0|%s||", path);
 
-	sprintf(statstr, "|%zd,%zd,%d,%zd,%d,%d,%zd,%zd,%zd,%zd,%zd,%zd,%zd|",
-		(ssize_t)huge_encode_dev(stat->dev),
-		(ssize_t)stat->ino,
-		(int)stat->mode,
-		(ssize_t)stat->nlink,
-		(int)stat->uid,
-		(int)stat->gid,
-		(ssize_t)huge_encode_dev(stat->rdev),
-		(ssize_t)stat->size,
-		(ssize_t)stat->atime.tv_sec,
-		(ssize_t)stat->mtime.tv_sec,
-		(ssize_t)stat->ctime.tv_sec,
-		(ssize_t)stat->blksize,
-		(ssize_t)stat->blocks
-		);
+	result_len = strlen(ds->result);
+	ds->result[result_len] = '\0'; /* first NUL terminator (NOP) */
+	ds->result[result_len+1] = '\0'; /* second NUL terminator */
 
-	if ((strlen(status)+strlen(path)+strlen(statstr)+2) <= *len) { /* double NUL terminator */
-		if (copy_to_user(*buf, status, strlen(status)))
+
+	if (result_len+2 <= *len) { /* double NUL terminator */
+		if (copy_to_user(*buf, ds->result, result_len+2))
 			return -EFAULT;
-		*buf += strlen(status); *len -= strlen(status);
-		if (copy_to_user(*buf, path, strlen(path)))
-			return -EFAULT;
-		*buf += strlen(path); *len -= strlen(path);
-		if (copy_to_user(*buf, statstr, strlen(statstr)))
-			return -EFAULT;
-		*buf += strlen(statstr); *len -= strlen(statstr);
-		if (copy_to_user(*buf, "\0\0", 2))
-			return -EFAULT;
-        /* NUL does not delimit for parrot implementation */
+        /* NUL does not delimit for parrot implementation, don't include +2 */
+		*buf += result_len; *len -= result_len;
 		return 0;
 	} else {
 		return -ERANGE;
@@ -1301,7 +1301,7 @@ static int search_directory (struct dir_search *ds, int n)
 		goto out;
 	}
 
-	ds->status = abspath(&ds->dirs[n].fp->f_path, ds->path);
+	ds->status = abspath(&ds->dirs[n].fp->f_path, ds->path); // expensive??
 	if (ds->status)
 		goto exit;
 
@@ -1330,14 +1330,17 @@ static int search_directory (struct dir_search *ds, int n)
 					ds->status = vfs_path_lookup(ds->dirs[n].fp->f_path.dentry, ds->dirs[n].fp->f_path.mnt, ds->dirs[n].entry, 0, &ds->dirs[n].path);
 					if (ds->status)
 						goto exit;
-					ds->status = vfs_getattr(ds->dirs[n].path.mnt, ds->dirs[n].path.dentry, &ds->dirs[n].stat);
+                    if (ds->flags & SEARCH_METADATA)
+						ds->status = vfs_getattr(ds->dirs[n].path.mnt, ds->dirs[n].path.dentry, &ds->dirs[n].stat);
+					else
+						memset(&ds->dirs[0].stat, 0, sizeof(struct kstat));
 					path_put(&ds->dirs[n].path);
 					if (ds->status)
 						goto exit;
 					if (ds->flags & SEARCH_INCLUDEROOT)
-						ds->status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
+						ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
 					else
-						ds->status = copy_search_result(&ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
+						ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
 					if (ds->status)
 						goto exit;
 					ds->results += 1;
@@ -1455,14 +1458,17 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 			else if (status)
 				goto exit;
 			ds->dirs[0].path = ds->dirs[1].path;
-			status = vfs_getattr(ds->dirs[0].path.mnt, ds->dirs[0].path.dentry, &ds->dirs[0].stat);
+			if (ds->flags & SEARCH_METADATA)
+				status = vfs_getattr(ds->dirs[0].path.mnt, ds->dirs[0].path.dentry, &ds->dirs[0].stat);
+			else
+				memset(&ds->dirs[0].stat, 0, sizeof(struct kstat));
 			path_put(&ds->dirs[0].path);
 			if (status)
 				goto exit;
 			if (ds->flags & SEARCH_INCLUDEROOT)
-				status = copy_search_result(&ds->next, &ds->len, ds->path, &ds->dirs[0].stat);
+				status = copy_search_result(ds, &ds->next, &ds->len, ds->path, &ds->dirs[0].stat);
 			else
-				status = copy_search_result(&ds->next, &ds->len, ds->path+ds->base, &ds->dirs[0].stat);
+				status = copy_search_result(ds, &ds->next, &ds->len, ds->path+ds->base, &ds->dirs[0].stat);
 			if (status)
 				goto exit;
 			ds->results += 1;
