@@ -1046,9 +1046,7 @@ static int ispattern (const char *pattern)
 	return 0;
 }
 
-#define collapse_forwardslash(p) do { while (*(p) == '/') (p)++; } while (0)
 #define is_filename(c)  ((c) != '/' && (c) != '\0')
-#define SEARCH_MAX_RECURSION   8
 static enum search_matched __match_pathname (int n, const char *pathname, const char *pattern, int flags)
 {
 	//printk("__match_pathname(%d, '%s', '%s', %d)\n", n, pathname, pattern, flags);
@@ -1125,7 +1123,7 @@ static enum search_matched match_pathname (const char *pathname, const char *pat
 #define SEARCH_W_OK        (1<<5)
 #define SEARCH_X_OK        (1<<6)
 
-static int search_isrecursive (const char *pattern)
+static int isrecursive (const char *pattern)
 {
 	for (; pattern; pattern = strchrskip(pattern+1, '|')) {
 		if (*pattern != '/')
@@ -1163,7 +1161,8 @@ struct dir_search {
 	char __user *next;
 	size_t len;
 
-	int recursive;
+	int isrecursive;
+	int ispattern;
 	size_t base;
 
 	char path[PATH_MAX+1];
@@ -1171,7 +1170,13 @@ struct dir_search {
 	/* result for copy_search_result with some room for stat */
 	char result[PATH_MAX+1024];
 
-    struct search_directory dirs[TREE_DEPTH];
+    struct search_directory *dirs;
+
+	/* used for fast PATH search */
+	struct {
+		struct kstat stat;
+		struct path path[2];
+	} psearch;
 };
 
 static int search_filldir (void *userdata, const char *name, int namelen, loff_t offset, u64 ino, unsigned int d_type)
@@ -1347,7 +1352,7 @@ static int search_directory (struct dir_search *ds, int n)
 					if (ds->flags & SEARCH_STOPATFIRST)
 						goto exit;
 				}
-				if (ds->dirs[n].type == 'd' && strcmp(ds->dirs[n].entry, ".") != 0 && strcmp(ds->dirs[n].entry, "..") != 0 && (ds->dirs[n].how == SEARCH_MATCH_PARTIAL || ds->recursive)) {
+				if (ds->dirs[n].type == 'd' && strcmp(ds->dirs[n].entry, ".") != 0 && strcmp(ds->dirs[n].entry, "..") != 0 && (ds->dirs[n].how == SEARCH_MATCH_PARTIAL || ds->isrecursive)) {
 					ds->status = search_directory(ds, n+1);
 					if (ds->status)
 						goto exit;
@@ -1407,8 +1412,20 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 	ds->flags = flags;
 	ds->buf = ds->next = buf;
 	ds->len = len;
+	ds->dirs = NULL;
 
-	ds->recursive = search_isrecursive(ds->pattern);
+	ds->isrecursive = isrecursive(ds->pattern);
+	ds->ispattern = ispattern(ds->pattern);
+
+	if (ds->ispattern) {
+		ds->dirs = kmalloc(sizeof(struct search_directory)*TREE_DEPTH, GFP_KERNEL);
+		if (!ds->dirs) {
+			goto exit3;
+		}
+	} else {
+		while (*ds->pattern == '/')
+		  ds->pattern += 1; /* remove leading forward slashes */
+	}
 
 	//printk("search(%p:\"%s\", %p:\"%s\", %d, %zu, %p)\n", paths, ds->paths, pattern, ds->pattern, ds->flags, ds->len, ds->buf);
 
@@ -1416,7 +1433,7 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 	while ((c = strsep(&n, "|")) != NULL) {
 		strcpy(ds->path, c);
 
-		if (ispattern(ds->pattern)) {
+		if (ds->ispattern) {
 			ds->base = 0; /* reset base to 0 as we are searching a new top-level directory */
 			status = search_directory(ds, 0);
 			if (status)
@@ -1429,46 +1446,32 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 			   Unfortunately this requires also putting pattern examination in search_directory when it's separate in match_pathname.
 			   This will do for now...
 			 */
-			status = kern_path(ds->path, 0, &ds->dirs[0].path);
-			if (status == -ENOENT)
-				continue;
-			else if (status)
-				goto exit;
-			/* canonicalize path */
-			status = abspath(&ds->dirs[0].path, ds->path);
-			if (status) {
-				path_put(&ds->dirs[0].path);
-				goto exit;
-			}
 			/* here we do another path_lookup and follow symlinks, we didn't the first time because we need the path with the final symlink */
-			path_put(&ds->dirs[0].path);
-			status = kern_path(ds->path, LOOKUP_FOLLOW, &ds->dirs[0].path);
+			status = kern_path(ds->path, LOOKUP_FOLLOW, &ds->psearch.path[0]);
 			if (status == -ENOENT)
 				continue;
 			else if (status)
 				goto exit;
 			ds->base = strlen(ds->path);
-			while (*ds->pattern == '/') ds->pattern += 1; /* remove leading forward slashes */
 			strcat(ds->path, "/");
 			strcat(ds->path, ds->pattern);
-			status = vfs_path_lookup(ds->dirs[0].path.dentry, ds->dirs[0].path.mnt, ds->pattern, 0, &ds->dirs[1].path);
-			path_put(&ds->dirs[0].path);
+			status = vfs_path_lookup(ds->psearch.path[0].dentry, ds->psearch.path[0].mnt, ds->pattern, 0, &ds->psearch.path[1]);
+			path_put(&ds->psearch.path[0]);
 			if (status == -ENOENT)
 				continue;
 			else if (status)
 				goto exit;
-			ds->dirs[0].path = ds->dirs[1].path;
 			if (ds->flags & SEARCH_METADATA)
-				status = vfs_getattr(ds->dirs[0].path.mnt, ds->dirs[0].path.dentry, &ds->dirs[0].stat);
+				status = vfs_getattr(ds->psearch.path[1].mnt, ds->psearch.path[1].dentry, &ds->psearch.stat);
 			else
-				memset(&ds->dirs[0].stat, 0, sizeof(struct kstat));
-			path_put(&ds->dirs[0].path);
+				memset(&ds->psearch.stat, 0, sizeof(struct kstat));
+			path_put(&ds->psearch.path[1]);
 			if (status)
 				goto exit;
 			if (ds->flags & SEARCH_INCLUDEROOT)
-				status = copy_search_result(ds, &ds->next, &ds->len, ds->path, &ds->dirs[0].stat);
+				status = copy_search_result(ds, &ds->next, &ds->len, ds->path, &ds->psearch.stat);
 			else
-				status = copy_search_result(ds, &ds->next, &ds->len, ds->path+ds->base, &ds->dirs[0].stat);
+				status = copy_search_result(ds, &ds->next, &ds->len, ds->path+ds->base, &ds->psearch.stat);
 			if (status)
 				goto exit;
 			ds->results += 1;
@@ -1490,6 +1493,8 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 exit:
 	goto exitn;
 exitn:
+	kfree(ds->dirs);
+exit3:
 	putname(ds->pattern);
 exit2:
 	putname(ds->paths);
