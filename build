@@ -1,0 +1,14 @@
+#!/bin/bash
+
+make --directory linux mrproper
+cp --force config linux/.config && make --directory linux silentoldconfig && make --directory linux
+
+# Both of the below will show openafs.ko errors, ignore...
+make --directory linux modules_install
+make --directory linux install
+
+# add to the end of /etc/rc.local
+#if [ "`uname -r`" = 3.4.0-SEARCH-SYSCALL ]; then
+#  insmod /lib/modules/3.4.0-SEARCH-SYSCALL/weak-updates/openafs.ko
+#  /usr/vice/etc/afsd
+#fi
