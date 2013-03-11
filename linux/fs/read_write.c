@@ -1311,7 +1311,7 @@ static int search_directory (struct dir_search *ds, int n)
 		goto exit;
 
 	if (ds->base == 0) /* not set? */
-		ds->base = strlen(ds->path);
+		ds->base = strlen(ds->path)+1; /* adding 1 to advance past '/' we add */
 
 	do {
 		ds->dirs[n].next = ds->dirs[n].entries;
@@ -1452,7 +1452,7 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 				continue;
 			else if (status)
 				goto exit;
-			ds->base = strlen(ds->path);
+			ds->base = strlen(ds->path)+1; /* adding 1 to advance past '/' we add */
 			strcat(ds->path, "/");
 			strcat(ds->path, ds->pattern);
 			status = vfs_path_lookup(ds->psearch.path[0].dentry, ds->psearch.path[0].mnt, ds->pattern, 0, &ds->psearch.path[1]);
