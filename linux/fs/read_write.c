@@ -1313,58 +1313,66 @@ static int search_directory (struct dir_search *ds, int n)
 	if (ds->base == 0) /* not set? */
 		ds->base = strlen(ds->path);
 
-	do {
-		ds->dirs[n].next = ds->dirs[n].entries;
-		ds->status = vfs_readdir(ds->dirs[n].fp, search_filldir, &ds->dirs[n]);
-		if (ds->status)
-			goto exit;
+	printk(">>> 1\n");
 
-		if (ds->dirs[n].next > ds->dirs[n].entries) {
-			ds->dirs[n].dir = ds->path+strlen(ds->path);
-			for (ds->dirs[n].entry = ds->dirs[n].entries; *ds->dirs[n].entry; ds->dirs[n].entry = ds->dirs[n].entry+strlen(ds->dirs[n].entry)+1) {
-				ds->dirs[n].type = *ds->dirs[n].entry;
-				ds->dirs[n].entry += 1;
+	/* Check if FS supports seach natively */
+	if (file->f_op && file->f_op->search) {
+		// Push search to FS driver
+	} else {
+		printk(">>> 2\n");
+		do {
+			ds->dirs[n].next = ds->dirs[n].entries;
+			ds->status = vfs_readdir(ds->dirs[n].fp, search_filldir, &ds->dirs[n]);
+			if (ds->status)
+				goto exit;
 
-				strcat(ds->path, "/");
-				strcat(ds->path, ds->dirs[n].entry);
-				//printk("path: `%s' type: %c\n", ds->path, ds->dirs[n].type);
+			if (ds->dirs[n].next > ds->dirs[n].entries) {
+				ds->dirs[n].dir = ds->path+strlen(ds->path);
+				for (ds->dirs[n].entry = ds->dirs[n].entries; *ds->dirs[n].entry; ds->dirs[n].entry = ds->dirs[n].entry+strlen(ds->dirs[n].entry)+1) {
+					ds->dirs[n].type = *ds->dirs[n].entry;
+					ds->dirs[n].entry += 1;
 
-				ds->dirs[n].how = match_pathname(ds->path+ds->base, ds->pattern, ds->flags);
-				if (ds->dirs[n].how == SEARCH_MATCH_SUCCESS) {
-					//printk("matched `%s'\n", ds->path);
-					ds->status = vfs_path_lookup(ds->dirs[n].fp->f_path.dentry, ds->dirs[n].fp->f_path.mnt, ds->dirs[n].entry, 0, &ds->dirs[n].path);
-					if (ds->status)
-						goto exit;
-                    if (ds->flags & SEARCH_METADATA)
-						ds->status = vfs_getattr(ds->dirs[n].path.mnt, ds->dirs[n].path.dentry, &ds->dirs[n].stat);
-					else
-						memset(&ds->dirs[0].stat, 0, sizeof(struct kstat));
-					path_put(&ds->dirs[n].path);
-					if (ds->status)
-						goto exit;
-					if (ds->flags & SEARCH_INCLUDEROOT)
-						ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
-					else
-						ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
-					if (ds->status)
-						goto exit;
-					ds->results += 1;
-					if (ds->flags & SEARCH_STOPATFIRST)
-						goto exit;
+					strcat(ds->path, "/");
+					strcat(ds->path, ds->dirs[n].entry);
+					//printk("path: `%s' type: %c\n", ds->path, ds->dirs[n].type);
+
+					ds->dirs[n].how = match_pathname(ds->path+ds->base, ds->pattern, ds->flags);
+					if (ds->dirs[n].how == SEARCH_MATCH_SUCCESS) {
+						//printk("matched `%s'\n", ds->path);
+						ds->status = vfs_path_lookup(ds->dirs[n].fp->f_path.dentry, ds->dirs[n].fp->f_path.mnt, ds->dirs[n].entry, 0, &ds->dirs[n].path);
+						if (ds->status)
+							goto exit;
+			    if (ds->flags & SEARCH_METADATA)
+							ds->status = vfs_getattr(ds->dirs[n].path.mnt, ds->dirs[n].path.dentry, &ds->dirs[n].stat);
+						else
+							memset(&ds->dirs[0].stat, 0, sizeof(struct kstat));
+						path_put(&ds->dirs[n].path);
+						if (ds->status)
+							goto exit;
+						if (ds->flags & SEARCH_INCLUDEROOT)
+							ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
+						else
+							ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
+						if (ds->status)
+							goto exit;
+						ds->results += 1;
+						if (ds->flags & SEARCH_STOPATFIRST)
+							goto exit;
+					}
+					if (ds->dirs[n].type == 'd' && strcmp(ds->dirs[n].entry, ".") != 0 && strcmp(ds->dirs[n].entry, "..") != 0 && (ds->dirs[n].how == SEARCH_MATCH_PARTIAL || ds->isrecursive)) {
+						ds->status = search_directory(ds, n+1);
+						if (ds->status)
+							goto exit;
+						/* check if we found something and STOPATFIRST is set */
+						if (ds->results > 0 && ds->flags & SEARCH_STOPATFIRST)
+							goto exit;
+					} /* else SEARCH_MATCH_FAILURE */
+
+					*ds->dirs[n].dir = '\0';
 				}
-				if (ds->dirs[n].type == 'd' && strcmp(ds->dirs[n].entry, ".") != 0 && strcmp(ds->dirs[n].entry, "..") != 0 && (ds->dirs[n].how == SEARCH_MATCH_PARTIAL || ds->isrecursive)) {
-					ds->status = search_directory(ds, n+1);
-					if (ds->status)
-						goto exit;
-					/* check if we found something and STOPATFIRST is set */
-					if (ds->results > 0 && ds->flags & SEARCH_STOPATFIRST)
-						goto exit;
-				} /* else SEARCH_MATCH_FAILURE */
-
-				*ds->dirs[n].dir = '\0';
 			}
-		}
-	} while (ds->dirs[n].next > ds->dirs[n].entries);
+		} while (ds->dirs[n].next > ds->dirs[n].entries);
+	}
 
 exit:
 	goto exitn;

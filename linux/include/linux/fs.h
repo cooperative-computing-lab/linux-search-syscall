@@ -1634,6 +1634,7 @@ struct file_operations {
 	int (*setlease)(struct file *, long, struct file_lock **);
 	long (*fallocate)(struct file *file, int mode, loff_t offset,
 			  loff_t len);
+	int (*search)(const char __user *, const char __user *, int, char __user *, size_t);
 };
 
 struct inode_operations {
