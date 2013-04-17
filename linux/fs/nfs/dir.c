@@ -59,14 +59,16 @@ static int nfs_rename(struct inode *, struct dentry *,
 static int nfs_fsync_dir(struct file *, loff_t, loff_t, int);
 static loff_t nfs_llseek_dir(struct file *, loff_t, int);
 static void nfs_readdir_clear_array(struct page*);
+static int nfs_search(struct inode *, const char __user *, const char __user *, int, char __user *, size_t);
 
 const struct file_operations nfs_dir_operations = {
 	.llseek		= nfs_llseek_dir,
 	.read		= generic_read_dir,
 	.readdir	= nfs_readdir,
-	.open		= nfs_opendir,
+	.open		= nfs_opendir, //CCL
 	.release	= nfs_closedir,
 	.fsync		= nfs_fsync_dir,
+	.search		= nfs_search
 };
 
 const struct inode_operations nfs_dir_inode_operations = {
@@ -190,6 +192,15 @@ nfs_opendir(struct inode *inode, struct file *filp)
 out:
 	put_rpccred(cred);
 	return res;
+}
+
+// CCL
+static int
+nfs_search(struct inode *inode, const char __user *path, const char __user *pattern, int options, char __user *buffer, size_t buffer_size)
+{
+	struct nfs_server *server = NFS_SERVER(inode);
+	int status = NFS_PROTO(inode)->search(server, path, pattern, options, buffer, buffer_size);
+	return status;
 }
 
 static int

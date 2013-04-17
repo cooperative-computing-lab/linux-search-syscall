@@ -16,6 +16,8 @@
 #include <linux/pagemap.h>
 #include <linux/splice.h>
 #include <linux/namei.h>
+#include <linux/dcache.h>
+#include <linux/mount.h>
 #include <linux/fs_struct.h>
 #include "read_write.h"
 
@@ -1313,13 +1315,40 @@ static int search_directory (struct dir_search *ds, int n)
 	if (ds->base == 0) /* not set? */
 		ds->base = strlen(ds->path);
 
-	printk(">>> 1\n");
+	/* Check if FS supports search natively */
+	if (ds->dirs[n].fp->f_op && ds->dirs[n].fp->f_op->search) {
+		/* Push search to FS driver */	
+		struct inode *inode = ds->dirs[n].fp->f_mapping->host;
 
-	/* Check if FS supports seach natively */
-	if (file->f_op && file->f_op->search) {
-		// Push search to FS driver
+		/*
+		struct file *filp = ds->dirs[n].fp;
+		struct path filpp = filp->f_path;
+		struct vfsmount *vmnt = filpp.mnt;
+		struct dentry *mntroot = vmnt->mnt_root;
+		struct qstr dnm = mntroot->d_name;
+		char *mnt_name = dnm.name;
+		*/
+
+		char *rel_path = ds->path + strlen("/mnt/nfs");
+		int driver_code = ds->dirs[n].fp->f_op->search(
+			inode,
+			rel_path,
+			ds->pattern,
+			ds->flags,
+			ds->next,
+			ds->len
+		);
+
+		ds->results += driver_code;
+		ds->next += driver_code;
+
+		if (driver_code < 0) {
+			ds->status = driver_code;
+			goto out;
+		}
+
+		ds->len -= driver_code;
 	} else {
-		printk(">>> 2\n");
 		do {
 			ds->dirs[n].next = ds->dirs[n].entries;
 			ds->status = vfs_readdir(ds->dirs[n].fp, search_filldir, &ds->dirs[n]);

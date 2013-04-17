@@ -90,6 +90,7 @@ struct nfs3_fh {
 #define NFS3PROC_FSINFO		19
 #define NFS3PROC_PATHCONF	20
 #define NFS3PROC_COMMIT		21
+#define NFS3PROC_SEARCH		22
 
 #define NFS_MNT3_VERSION	3
  

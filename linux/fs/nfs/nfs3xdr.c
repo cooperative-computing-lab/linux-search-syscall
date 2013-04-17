@@ -61,6 +61,7 @@
 #define NFS3_readdirargs_sz	(NFS3_fh_sz+NFS3_cookieverf_sz+3)
 #define NFS3_readdirplusargs_sz	(NFS3_fh_sz+NFS3_cookieverf_sz+4)
 #define NFS3_commitargs_sz	(NFS3_fh_sz+3)
+#define NFS3_searchargs_sz	(NFS3_filename_sz)
 
 #define NFS3_getattrres_sz	(1+NFS3_fattr_sz)
 #define NFS3_setattrres_sz	(1+NFS3_wcc_data_sz)
@@ -78,6 +79,7 @@
 #define NFS3_fsinfores_sz	(1+NFS3_post_op_attr_sz+12)
 #define NFS3_pathconfres_sz	(1+NFS3_post_op_attr_sz+6)
 #define NFS3_commitres_sz	(1+NFS3_wcc_data_sz+2)
+#define NFS3_searchres_sz	(NFS3_filename_sz)
 
 #define ACL3_getaclargs_sz	(NFS3_fh_sz+1)
 #define ACL3_setaclargs_sz	(NFS3_fh_sz+1+ \
@@ -883,6 +885,21 @@ static void nfs3_xdr_enc_setattr3args(struct rpc_rqst *req,
 }
 
 /*
+ * 3.3.3  SEARCH3args
+ *
+ *	CCL
+ */ 
+static void nfs3_xdr_enc_search3args(struct rpc_rqst *req,
+				     struct xdr_stream *xdr,
+				     const struct nfs3_searchargs *args)
+{
+	encode_filename3(xdr, args->path, strlen(args->path));
+	encode_filename3(xdr, args->pattern, strlen(args->pattern));
+	encode_uint32(xdr, args->flags);
+}
+
+
+/*
  * 3.3.3  LOOKUP3args
  *
  *	struct LOOKUP3args {
@@ -895,6 +912,11 @@ static void nfs3_xdr_enc_lookup3args(struct rpc_rqst *req,
 {
 	encode_diropargs3(xdr, args->fh, args->name, args->len);
 }
+
+
+
+
+
 
 /*
  * 3.3.4  ACCESS3args
@@ -2160,6 +2182,54 @@ out_status:
 }
 
 /*
+ * Search result decoding
+ * CCL
+ */
+
+static int decode_search3resok(struct xdr_stream *xdr,
+			       struct nfs3_searchres *result)
+{
+	__be32 *p;
+	u32 count;
+
+	p = xdr_inline_decode(xdr, 4);
+	if (unlikely(p == NULL))
+		goto out_overflow;
+	count = be32_to_cpup(p);
+	p = xdr_inline_decode(xdr, count);
+	if (unlikely(p == NULL))
+		goto out_overflow;
+	result->buffer = (const char *)p;
+	return 0;
+
+out_overflow:
+        print_overflow_msg(__func__, xdr);
+        return -EIO;
+}
+
+static int nfs3_xdr_dec_search3res(struct rpc_rqst *req,
+                                   struct xdr_stream *xdr,
+                                   struct nfs3_searchres *result)
+{
+        enum nfs_stat status;
+        int error;
+
+        error = decode_nfsstat3(xdr, &status);
+        if (unlikely(error))
+                goto out;
+        if (status != NFS3_OK)
+                goto out_status;
+        error = decode_search3resok(xdr, result);
+out:
+        return error;
+out_status:
+        return nfs_stat_to_errno(status);
+}
+
+
+
+
+/*
  * 3.3.19  FSINFO3res
  *
  *	struct FSINFO3resok {
@@ -2459,6 +2529,7 @@ struct rpc_procinfo	nfs3_procedures[] = {
 	PROC(FSINFO,		getattr,	fsinfo,		0),
 	PROC(PATHCONF,		getattr,	pathconf,	0),
 	PROC(COMMIT,		commit,		commit,		5),
+	PROC(SEARCH,		search,		search,		3),
 };
 
 const struct rpc_version nfs_version3 = {

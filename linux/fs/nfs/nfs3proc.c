@@ -232,6 +232,40 @@ out:
 	return status;
 }
 
+// CCL
+static int nfs3_proc_search(struct nfs_server *server, const char *path, const char *pattern, int flags, char *buffer, size_t buffer_size)
+{
+	struct nfs3_searchargs	arg = {
+		.path		= path,
+		.pattern	= pattern,
+		.flags		= flags
+	};
+	struct nfs3_searchres	res;
+	struct rpc_message msg = {
+		.rpc_proc	= &nfs3_procedures[NFS3PROC_SEARCH],
+		.rpc_argp	= &arg,
+		.rpc_resp	= &res
+	};
+
+	int status = -ENOMEM;
+
+	dprintk("NFS call  search\n");
+
+	rpc_call_sync(server->client, &msg, 0);
+
+	if (strlen(res.buffer) > buffer_size) {
+		status = -ERANGE;
+		goto out;
+	}
+
+	strcpy(buffer, res.buffer);
+	status = strlen(res.buffer);
+
+out:
+	dprintk("NFS reply search: %d\n", status);
+	return status;
+}
+
 static int nfs3_proc_readlink(struct inode *inode, struct page *page,
 		unsigned int pgbase, unsigned int pglen)
 {
@@ -912,4 +946,5 @@ const struct nfs_rpc_ops nfs_v3_clientops = {
 	.clear_acl_cache = nfs3_forget_cached_acls,
 	.close_context	= nfs_close_context,
 	.init_client	= nfs_init_client,
+	.search		= nfs3_proc_search
 };
