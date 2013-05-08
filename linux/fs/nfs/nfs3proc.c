@@ -233,14 +233,19 @@ out:
 }
 
 // CCL
-static int nfs3_proc_search(struct nfs_server *server, const char *path, const char *pattern, int flags, char *buffer, size_t buffer_size)
+static int nfs3_proc_search(struct inode *inode, const char *mnt, struct qstr *path, const char *pattern, int flags, char *buffer, size_t buffer_size)
 {
+	struct nfs_server *server = NFS_SERVER(inode);
+
 	struct nfs3_searchargs	arg = {
-		.path		= path,
+		.fh		= NFS_FH(inode),
+		.mnt		= mnt,
 		.pattern	= pattern,
 		.flags		= flags
 	};
+	
 	struct nfs3_searchres	res;
+
 	struct rpc_message msg = {
 		.rpc_proc	= &nfs3_procedures[NFS3PROC_SEARCH],
 		.rpc_argp	= &arg,
@@ -249,9 +254,9 @@ static int nfs3_proc_search(struct nfs_server *server, const char *path, const c
 
 	int status = -ENOMEM;
 
-	dprintk("NFS call  search\n");
+	dprintk("NFS call search\n");
 
-	rpc_call_sync(server->client, &msg, 0);
+	status = rpc_call_sync(server->client, &msg, 0);
 
 	if (strlen(res.buffer) > buffer_size) {
 		status = -ERANGE;

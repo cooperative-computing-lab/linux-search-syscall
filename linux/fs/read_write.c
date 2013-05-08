@@ -20,6 +20,7 @@
 #include <linux/mount.h>
 #include <linux/fs_struct.h>
 #include "read_write.h"
+#include "mount.h"
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -1172,7 +1173,7 @@ struct dir_search {
 	/* result for copy_search_result with some room for stat */
 	char result[PATH_MAX+1024];
 
-    struct search_directory *dirs;
+	struct search_directory *dirs;
 
 	/* used for fast PATH search */
 	struct {
@@ -1317,21 +1318,18 @@ static int search_directory (struct dir_search *ds, int n)
 
 	/* Check if FS supports search natively */
 	if (ds->dirs[n].fp->f_op && ds->dirs[n].fp->f_op->search) {
+
 		/* Push search to FS driver */	
-		struct inode *inode = ds->dirs[n].fp->f_mapping->host;
-
-		/*
+		char *pathbuf = kmalloc(PATH_MAX, GFP_TEMPORARY);
 		struct file *filp = ds->dirs[n].fp;
-		struct path filpp = filp->f_path;
-		struct vfsmount *vmnt = filpp.mnt;
-		struct dentry *mntroot = vmnt->mnt_root;
-		struct qstr dnm = mntroot->d_name;
-		char *mnt_name = dnm.name;
-		*/
+		struct inode *inode = filp->f_mapping->host;
+		struct mount *mnt = real_mount(filp->f_path.mnt);
+		char *mount_real_path = dentry_path(mnt->mnt_mountpoint, pathbuf, PATH_MAX);
+		char *rel_path = ds->path + strlen(mount_real_path);
 
-		char *rel_path = ds->path + strlen("/mnt/nfs");
 		int driver_code = ds->dirs[n].fp->f_op->search(
 			inode,
+			mount_real_path,
 			rel_path,
 			ds->pattern,
 			ds->flags,
@@ -1348,6 +1346,7 @@ static int search_directory (struct dir_search *ds, int n)
 		}
 
 		ds->len -= driver_code;
+
 	} else {
 		do {
 			ds->dirs[n].next = ds->dirs[n].entries;
@@ -1381,7 +1380,7 @@ static int search_directory (struct dir_search *ds, int n)
 						if (ds->flags & SEARCH_INCLUDEROOT)
 							ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path, &ds->dirs[n].stat);
 						else
-							ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->path+ds->base, &ds->dirs[n].stat);
+							ds->status = copy_search_result(ds, &ds->next, &ds->len, ds->dirs[n].entry, &ds->dirs[n].stat);
 						if (ds->status)
 							goto exit;
 						ds->results += 1;
@@ -1415,6 +1414,8 @@ out:
 
 SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern, int, flags, char __user *, buf, size_t, len)
 {
+	//printk("paths: %s, pattern: %s, flags: %d\n", paths, pattern, flags);
+
 	int status = 0;
 	struct dir_search *ds;
 
@@ -1526,6 +1527,8 @@ SYSCALL_DEFINE5(search, const char __user *, paths, const char __user *, pattern
 			goto exit;
 	}
 	status = ds->results;
+
+	//printk("buffer: %s\n", buf);
 
 exit:
 	goto exitn;

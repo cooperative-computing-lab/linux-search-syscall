@@ -61,7 +61,7 @@
 #define NFS3_readdirargs_sz	(NFS3_fh_sz+NFS3_cookieverf_sz+3)
 #define NFS3_readdirplusargs_sz	(NFS3_fh_sz+NFS3_cookieverf_sz+4)
 #define NFS3_commitargs_sz	(NFS3_fh_sz+3)
-#define NFS3_searchargs_sz	(NFS3_filename_sz)
+#define NFS3_searchargs_sz	(NFS3_filename_sz+NFS3_fh_sz)
 
 #define NFS3_getattrres_sz	(1+NFS3_fattr_sz)
 #define NFS3_setattrres_sz	(1+NFS3_wcc_data_sz)
@@ -79,7 +79,7 @@
 #define NFS3_fsinfores_sz	(1+NFS3_post_op_attr_sz+12)
 #define NFS3_pathconfres_sz	(1+NFS3_post_op_attr_sz+6)
 #define NFS3_commitres_sz	(1+NFS3_wcc_data_sz+2)
-#define NFS3_searchres_sz	(NFS3_filename_sz)
+#define NFS3_searchres_sz	(NFS3_filename_sz*3200)
 
 #define ACL3_getaclargs_sz	(NFS3_fh_sz+1)
 #define ACL3_setaclargs_sz	(NFS3_fh_sz+1+ \
@@ -893,7 +893,8 @@ static void nfs3_xdr_enc_search3args(struct rpc_rqst *req,
 				     struct xdr_stream *xdr,
 				     const struct nfs3_searchargs *args)
 {
-	encode_filename3(xdr, args->path, strlen(args->path));
+	encode_nfs_fh3(xdr, args->fh);
+	encode_filename3(xdr, args->mnt, strlen(args->mnt));
 	encode_filename3(xdr, args->pattern, strlen(args->pattern));
 	encode_uint32(xdr, args->flags);
 }

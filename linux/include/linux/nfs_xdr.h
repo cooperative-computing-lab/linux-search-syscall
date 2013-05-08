@@ -493,7 +493,8 @@ struct nfs_readres {
  * Arguments to the search call. CCL
  */
 struct nfs3_searchargs {
-	const char *		path;
+	struct nfs3_fh *	fh;
+	const char *		mnt;
 	const char *		pattern;
 	int			flags;
 };
@@ -1303,7 +1304,7 @@ struct nfs_rpc_ops {
 	int	(*init_client) (struct nfs_client *, const struct rpc_timeout *,
 				const char *, rpc_authflavor_t, int);
 	int	(*secinfo)(struct inode *, const struct qstr *, struct nfs4_secinfo_flavors *);
-	int	(*search)(struct nfs_server *, const char *, const char *, int, char *, size_t);
+	int	(*search)(struct inode *, const char *, struct qstr *, const char *, int, char *, size_t);
 };
 
 /*
